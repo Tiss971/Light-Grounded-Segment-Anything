@@ -107,7 +107,7 @@ def show_box(box, ax, label):
     ax.text(x0, y0, label)
 
 
-def save_mask_data(output_dir, mask_list, box_list, label_list):
+def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask.jpg"):
     value = 0  # 0 for background
 
     mask_img = torch.zeros(mask_list.shape[-2:])
@@ -116,7 +116,7 @@ def save_mask_data(output_dir, mask_list, box_list, label_list):
     plt.figure(figsize=(10, 10))
     plt.imshow(mask_img.numpy())
     plt.axis('off')
-    plt.savefig(os.path.join(output_dir, 'mask.jpg'), bbox_inches="tight", dpi=300, pad_inches=0.0)
+    plt.savefig(os.path.join(output_dir, filename), bbox_inches="tight", dpi=300, pad_inches=0.0)
 
     json_data = [{
         'value': value,
@@ -132,7 +132,7 @@ def save_mask_data(output_dir, mask_list, box_list, label_list):
             'logit': float(logit),
             'box': box.numpy().tolist(),
         })
-    with open(os.path.join(output_dir, 'mask.json'), 'w') as f:
+    with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
         json.dump(json_data, f)
 
 
@@ -148,9 +148,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sam_checkpoint", type=str, required=False, help="path to sam checkpoint file"
-    )
-    parser.add_argument(
-        "--sam_hq_checkpoint", type=str, default=None, help="path to sam-hq checkpoint file"
     )
     parser.add_argument(
         "--use_sam_hq", action="store_true", help="using sam-hq for prediction"
@@ -172,7 +169,6 @@ if __name__ == "__main__":
     grounded_checkpoint = args.grounded_checkpoint  # change the path of the model
     sam_version = args.sam_version
     sam_checkpoint = args.sam_checkpoint
-    sam_hq_checkpoint = args.sam_hq_checkpoint
     use_sam_hq = args.use_sam_hq
     image_path = args.input_image
     text_prompt = args.text_prompt
@@ -183,57 +179,80 @@ if __name__ == "__main__":
 
     # make dir
     os.makedirs(output_dir, exist_ok=True)
-    # load image
-    image_pil, image = load_image(image_path)
+
     # load model
     model = load_model(config_file, grounded_checkpoint, device=device)
 
-    # visualize raw image
-    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
+    # ignore subfolder and raw image
+    EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
+    #TODO: use allow list instead of ignore list
 
-    # run grounding dino model
-    boxes_filt, pred_phrases = get_grounding_output(
-        model, image, text_prompt, box_threshold, text_threshold, device=device
-    )
+    paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and not f.endswith(tuple(EXT_IGNORE))]
+    print(f"Found {len(paths)} images")
+    for image_path in sorted(paths):
+        # load image
+        image_pil, image = load_image(image_path)
+        filename = os.path.basename(image_path).split('/')[-1]
+        print(f" ==> Processing {filename} <==")
 
-    # initialize SAM
-    if use_sam_hq:
-        predictor = SamPredictor(sam_hq_model_registry[sam_version](checkpoint=sam_hq_checkpoint).to(device))
-    else:
-        predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
-    image = cv2.imread(image_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
+        # visualize raw image
+        # image_pil.save(os.path.join(output_dir, filename))
 
-    size = image_pil.size
-    H, W = size[1], size[0]
-    for i in range(boxes_filt.size(0)):
-        boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
-        boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
-        boxes_filt[i][2:] += boxes_filt[i][:2]
+        # run grounding dino model
+        boxes_filt, pred_phrases = get_grounding_output(
+            model, image, text_prompt, box_threshold, text_threshold, device=device
+        )
+        if len(boxes_filt) == 0:
+            print(f"\t - No object found for {filename}")   
+            continue
+        else:
+            print(f"\t - {len(boxes_filt)} objects found for {filename}")
 
-    boxes_filt = boxes_filt.cpu()
-    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+        # initialize SAM
+        if use_sam_hq:
+            predictor = SamPredictor(sam_hq_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
+        else:
+            predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        predictor.set_image(image)
 
-    masks, _, _ = predictor.predict_torch(
-        point_coords = None,
-        point_labels = None,
-        boxes = transformed_boxes.to(device),
-        multimask_output = False,
-    )
+        size = image_pil.size
+        H, W = size[1], size[0]
+        for i in range(boxes_filt.size(0)):
+            boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+            boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+            boxes_filt[i][2:] += boxes_filt[i][:2]
 
-    # draw output image
-    plt.figure(figsize=(10, 10))
-    plt.imshow(image)
-    for mask in masks:
-        show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
-    for box, label in zip(boxes_filt, pred_phrases):
-        show_box(box.numpy(), plt.gca(), label)
+        boxes_filt = boxes_filt.cpu()
+        transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+        masks, _, _ = predictor.predict_torch(
+            point_coords = None,
+            point_labels = None,
+            boxes = transformed_boxes.to(device),
+            multimask_output = False,
+        )
 
-    plt.axis('off')
-    plt.savefig(
-        os.path.join(output_dir, "grounded_sam_output.jpg"),
-        bbox_inches="tight", dpi=300, pad_inches=0.0
-    )
+        # draw output image
+        plt.figure(figsize=(10, 10))
+        plt.imshow(image)
+        for mask in masks:
+            show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
+            #MAYBE: save each mask
+            # plt.savefig(
+            #     os.path.join(output_dir, f"{filename_ext[0]}_all_masks.{filename_ext[1]}"),
+            #     bbox_inches="tight", dpi=300, pad_inches=0.0
+        # )
+        for box, label in zip(boxes_filt, pred_phrases):
+            show_box(box.numpy(), plt.gca(), label)
 
-    save_mask_data(output_dir, masks, boxes_filt, pred_phrases)
+        plt.axis('off')
+        filename_ext = filename.split('.')
+        plt.savefig(
+            os.path.join(output_dir, f"{filename_ext[0]}_all_masks.{filename_ext[1]}"),
+            bbox_inches="tight", dpi=300, pad_inches=0.0
+        )
+
+        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename)
+    print("Done")
+
