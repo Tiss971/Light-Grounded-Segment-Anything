@@ -184,10 +184,10 @@ if __name__ == "__main__":
     model = load_model(config_file, grounded_checkpoint, device=device)
 
     # ignore subfolder and raw image
-    EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
-    #TODO: use allow list instead of ignore list
+    # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
+    EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
 
-    paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and not f.endswith(tuple(EXT_IGNORE))]
+    paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.endswith(tuple(EXT_IMG_ALLOW))]
     print(f"Found {len(paths)} images")
     for image_path in sorted(paths):
         # load image

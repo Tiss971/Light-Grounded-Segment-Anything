@@ -1,6 +1,6 @@
 addict
 diffusers
-gradio
+gradio ~= 3.50.2
 huggingface_hub
 matplotlib
 numpy

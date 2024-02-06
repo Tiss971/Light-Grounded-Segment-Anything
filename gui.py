@@ -177,7 +177,7 @@ dino_ckpt = "groundingdino_swint_ogc.pth"
 sam_ckpt='sam_vit_h_4b8939.pth' 
 output_dir="outputs"
 device="cuda"
-
+img_idx = 0
 
 # blip_processor = None
 # blip_model = None
@@ -363,6 +363,36 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
     else:
         print("task_type:{} error!".format(task_type))
 
+def next_img():
+    global img_idx
+
+    if img_idx < len(paths) - 2:
+        img_idx += 1
+        next_btn = gr.Button(value="Next Image")  
+    elif img_idx == len(paths) - 2:
+        img_idx += 1
+        next_btn = gr.Button(value="No more Image", interactive=False)
+    else: #last image ; func should be disabled
+        next_btn =  gr.Button(value="No more images, IMP", interactive=False)
+
+    return Image.open(paths[img_idx]), gr.Button(value="Previous Image", interactive=True), next_btn, gr.Label(value=f"{img_idx+1}/{len(paths)}")
+
+def prev_img():
+    global img_idx
+
+    if img_idx > 1:
+        img_idx -= 1
+        prev_btn = gr.Button(value="Previous Image")  
+    elif img_idx == 1:
+        img_idx -= 1
+        prev_btn = gr.Button(value="No more Image", interactive=False)
+    else: #first image; func should be disabled
+        prev_btn = gr.Button(value="No more images, IMP", interactive=False)
+
+    return Image.open(paths[img_idx]), prev_btn, gr.Button(value="Next Image",interactive=True), gr.Label(value=f"{img_idx+1}/{len(paths)}")
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Grounded SAM demo", add_help=True)
     parser.add_argument("-i","--img", type=str, help="path to the image")
@@ -373,6 +403,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(args)
+    
+    # ignore subfolder and raw image
+    # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
+    EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
+    paths = [args.img] if os.path.isfile(args.img) else [os.path.join(args.img, f) for f in os.listdir(args.img) if os.path.isfile(os.path.join(args.img, f)) and f.endswith(tuple(EXT_IMG_ALLOW))]
 
     block = gr.Blocks()
     if not args.no_gradio_queue:
@@ -388,11 +423,14 @@ if __name__ == "__main__":
             load_ckpts = gr.Button(variant="primary", size="lg", value="Load DINO and SAM",  container=True)
         with gr.Row():
             with gr.Column():
-                input_image = gr.Image(source='upload', type="pil", value=args.img, tool="sketch")
+                input_image = gr.Image(source='upload', type="pil", value=paths[img_idx], tool="sketch")
                 task_type = gr.Dropdown(["scribble", "automask", "det", "seg"], value="scribble", label="task_type") #'automatic' disabled need blip and transformers
                 text_prompt = gr.Textbox(label="Text Prompt")
                 with gr.Row():
-                    next_button = gr.Button(value="Next Image", interactive=False) #TODO   
+                    prev_button = gr.Button(value="Previous Image", interactive=False)
+                    next_button = gr.Button(value="Next Image")
+                    count_img = gr.Label(value=f"{img_idx+1}/{len(paths)}",min_width=80,label="Image index", color="grey")
+                with gr.Row():
                     run_button = gr.Button(label="Run", interactive=False)
                 with gr.Accordion("Advanced options", open=False):
                     box_threshold = gr.Slider(
@@ -410,6 +448,8 @@ if __name__ == "__main__":
                 gallery = gr.Gallery(label="Generated images", show_label=False, elem_id="gallery").style(preview=True, grid=2, object_fit="scale-down")
 
         load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
+        prev_button.click(fn=prev_img, outputs=[input_image, prev_button, next_button, count_img])
+        next_button.click(fn=next_img, outputs=[input_image, prev_button, next_button, count_img])
         run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, iou_threshold, scribble_mode], outputs=gallery)
 
 
