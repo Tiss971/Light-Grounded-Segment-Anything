@@ -19,17 +19,17 @@ from GroundingDINO.groundingdino.util.slconfig import SLConfig
 from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
 # segment anything
-from segment_anything import build_sam, SamPredictor, SamAutomaticMaskGenerator
+from segment_anything import build_sam, SamPredictor, SamAutomaticMaskGenerator, sam_model_registry, sam_hq_model_registry
 import numpy as np
 
 # diffusers
 import torch
-from diffusers import StableDiffusionInpaintPipeline
+# from diffusers import StableDiffusionInpaintPipeline
 
 # BLIP
-from transformers import BlipProcessor, BlipForConditionalGeneration
+# from transformers import BlipProcessor, BlipForConditionalGeneration
 
-import openai
+# import openai
 
 def show_anns(anns):
     if len(anns) == 0:
@@ -56,29 +56,29 @@ def show_anns(anns):
     full_img = Image.fromarray(np.uint8(full_img))
     return full_img, res
 
-def generate_caption(processor, blip_model, raw_image):
-    # unconditional image captioning
-    inputs = processor(raw_image, return_tensors="pt").to("cuda", torch.float16)
-    out = blip_model.generate(**inputs)
-    caption = processor.decode(out[0], skip_special_tokens=True)
-    return caption
+# def generate_caption(processor, blip_model, raw_image):
+#     # unconditional image captioning
+#     inputs = processor(raw_image, return_tensors="pt").to("cuda", torch.float16)
+#     out = blip_model.generate(**inputs)
+#     caption = processor.decode(out[0], skip_special_tokens=True)
+#     return caption
 
-def generate_tags(caption, split=',', max_tokens=100, model="gpt-3.5-turbo", openai_api_key=''):
-    openai.api_key = openai_api_key
-    openai.api_base = 'https://closeai.deno.dev/v1'
-    prompt = [
-        {
-            'role': 'system',
-            'content': 'Extract the unique nouns in the caption. Remove all the adjectives. ' + \
-                       f'List the nouns in singular form. Split them by "{split} ". ' + \
-                       f'Caption: {caption}.'
-        }
-    ]
-    response = litellm.completion(model=model, messages=prompt, temperature=0.6, max_tokens=max_tokens)
-    reply = response['choices'][0]['message']['content']
-    # sometimes return with "noun: xxx, xxx, xxx"
-    tags = reply.split(':')[-1].strip()
-    return tags
+# def generate_tags(caption, split=',', max_tokens=100, model="gpt-3.5-turbo", openai_api_key=''):
+#     openai.api_key = openai_api_key
+#     openai.api_base = 'https://closeai.deno.dev/v1'
+#     prompt = [
+#         {
+#             'role': 'system',
+#             'content': 'Extract the unique nouns in the caption. Remove all the adjectives. ' + \
+#                        f'List the nouns in singular form. Split them by "{split} ". ' + \
+#                        f'Caption: {caption}.'
+#         }
+#     ]
+#     response = litellm.completion(model=model, messages=prompt, temperature=0.6, max_tokens=max_tokens)
+#     reply = response['choices'][0]['message']['content']
+#     # sometimes return with "noun: xxx, xxx, xxx"
+#     tags = reply.split(':')[-1].strip()
+#     return tags
 
 def transform_image(image_pil):
 
@@ -173,22 +173,51 @@ def draw_box(box, draw, label):
 
 config_file = 'GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
 ckpt_repo_id = "ShilongLiu/GroundingDINO"
-ckpt_filenmae = "groundingdino_swint_ogc.pth"
-sam_checkpoint='sam_vit_h_4b8939.pth' 
+dino_ckpt = "groundingdino_swint_ogc.pth"
+sam_ckpt='sam_vit_h_4b8939.pth' 
 output_dir="outputs"
 device="cuda"
 
 
-blip_processor = None
-blip_model = None
+# blip_processor = None
+# blip_model = None
 groundingdino_model = None
 sam_predictor = None
 sam_automask_generator = None
-inpaint_pipeline = None
+# inpaint_pipeline = None
 
-def run_grounded_sam(input_image, text_prompt, task_type, inpaint_prompt, box_threshold, text_threshold, iou_threshold, inpaint_mode, scribble_mode, openai_api_key):
+def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
+    global groundingdino_model, sam_predictor, sam_automask_generator
 
-    global blip_processor, blip_model, groundingdino_model, sam_predictor, sam_automask_generator, inpaint_pipeline
+    # load grounding dino model
+    try:
+        groundingdino_model = load_model(config_file, dino_path, device=device)
+    except Exception as e:
+        print(f"Error loading Grounding DINO model: {e}")
+        return dino_path.update(label="Error loading model !"), sam_path, use_sam_hq, sam_version, gr.Button(label="Run", interactive=False)
+
+    # load sam model
+    try:
+        # initialize SAM
+        if use_sam_hq:
+            sam = sam_hq_model_registry[sam_version](checkpoint=sam_path)
+        else:
+            sam = sam_model_registry[sam_version](checkpoint=sam_path)
+        # sam = build_sam(checkpoint=sam_path)
+        sam.to(device=device)
+        sam_predictor = SamPredictor(sam)
+        sam_automask_generator = SamAutomaticMaskGenerator(sam)
+    except Exception as e:
+        print(f"Error loading SAM model: {e}")
+        return dino_path, sam_path.update(label="Error loading model !"), use_sam_hq, sam_version, gr.Button(label="Run", interactive=False)
+
+    return dino_path, sam_path, use_sam_hq, sam_version, gr.Button(label="Run", interactive=True)
+
+def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, iou_threshold, scribble_mode):
+
+    # global blip_processor, blip_model
+    global groundingdino_model, sam_predictor, sam_automask_generator
+    # global inpaint_pipeline
 
     # make dir
     os.makedirs(output_dir, exist_ok=True)
@@ -197,16 +226,17 @@ def run_grounded_sam(input_image, text_prompt, task_type, inpaint_prompt, box_th
     scribble = input_image["mask"]
     size = image.size # w, h
 
-    if sam_predictor is None:
-        # initialize SAM
-        assert sam_checkpoint, 'sam_checkpoint is not found!'
-        sam = build_sam(checkpoint=sam_checkpoint)
-        sam.to(device=device)
-        sam_predictor = SamPredictor(sam)
-        sam_automask_generator = SamAutomaticMaskGenerator(sam)
+    # NO FIRST INIT
+    # if sam_predictor is None:
+    #     # initialize SAM
+    #     assert sam_ckpt, 'sam_ckpt is not found!'
+    #     sam = build_sam(checkpoint=sam_ckpt)
+    #     sam.to(device=device)
+    #     sam_predictor = SamPredictor(sam)
+    #     sam_automask_generator = SamAutomaticMaskGenerator(sam)
 
-    if groundingdino_model is None:
-        groundingdino_model = load_model(config_file, ckpt_filenmae, device=device)
+    # if groundingdino_model is None:
+    #     groundingdino_model = load_model(config_file, dino_ckpt, device=device)
 
     image_pil = image.convert("RGB")
     image = np.array(image_pil)
@@ -243,17 +273,17 @@ def run_grounded_sam(input_image, text_prompt, task_type, inpaint_prompt, box_th
     else:
         transformed_image = transform_image(image_pil)
 
-        if task_type == 'automatic':
-            # generate caption and tags
-            # use Tag2Text can generate better captions
-            # https://huggingface.co/spaces/xinyu1205/Tag2Text
-            # but there are some bugs...
-            blip_processor = blip_processor or BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
-            blip_model = blip_model or BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large", torch_dtype=torch.float16).to("cuda")
-            text_prompt = generate_caption(blip_processor, blip_model, image_pil)
-            if len(openai_api_key) > 0:
-                text_prompt = generate_tags(text_prompt, split=",", openai_api_key=openai_api_key)
-            print(f"Caption: {text_prompt}")
+        # if task_type == 'automatic':
+        #     # generate caption and tags
+        #     # use Tag2Text can generate better captions
+        #     # https://huggingface.co/spaces/xinyu1205/Tag2Text
+        #     # but there are some bugs...
+        #     blip_processor = blip_processor or BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
+        #     blip_model = blip_model or BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large", torch_dtype=torch.float16).to("cuda")
+        #     text_prompt = generate_caption(blip_processor, blip_model, image_pil)
+        #     if len(openai_api_key) > 0:
+        #         text_prompt = generate_tags(text_prompt, split=",", openai_api_key=openai_api_key)
+        #     print(f"Caption: {text_prompt}")
 
         # run grounding dino model
         boxes_filt, scores, pred_phrases = get_grounding_output(
@@ -270,7 +300,7 @@ def run_grounded_sam(input_image, text_prompt, task_type, inpaint_prompt, box_th
         boxes_filt = boxes_filt.cpu()
 
 
-        if task_type == 'seg' or task_type == 'inpainting' or task_type == 'automatic':
+        if task_type == 'seg' or task_type == 'automatic':
             sam_predictor.set_image(image)
 
             if task_type == 'automatic':
@@ -330,34 +360,16 @@ def run_grounded_sam(input_image, text_prompt, task_type, inpaint_prompt, box_th
         image_pil = image_pil.convert('RGBA')
         image_pil.alpha_composite(mask_image)
         return [image_pil, mask_image]
-    elif task_type == 'inpainting':
-        assert inpaint_prompt, 'inpaint_prompt is not found!'
-        # inpainting pipeline
-        if inpaint_mode == 'merge':
-            masks = torch.sum(masks, dim=0).unsqueeze(0)
-            masks = torch.where(masks > 0, True, False)
-        mask = masks[0][0].cpu().numpy() # simply choose the first mask, which will be refine in the future release
-        mask_pil = Image.fromarray(mask)
-        
-        if inpaint_pipeline is None:
-            inpaint_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-inpainting", torch_dtype=torch.float16
-            )
-            inpaint_pipeline = inpaint_pipeline.to("cuda")
-
-        image = inpaint_pipeline(prompt=inpaint_prompt, image=image_pil.resize((512, 512)), mask_image=mask_pil.resize((512, 512))).images[0]
-        image = image.resize(size)
-
-        return [image, mask_pil]
     else:
         print("task_type:{} error!".format(task_type))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Grounded SAM demo", add_help=True)
+    parser.add_argument("-i","--img", type=str, help="path to the image")
     parser.add_argument("--debug", action="store_true", help="using debug mode")
     parser.add_argument("--share", action="store_true", help="share the app")
     parser.add_argument('--port', type=int, default=7589, help='port to run the server')
-    parser.add_argument('--no-gradio-queue', action="store_true", help='path to the SAM checkpoint')
+    parser.add_argument('--no-gradio-queue', action="store_true", help='disable gradio queue')
     args = parser.parse_args()
 
     print(args)
@@ -368,12 +380,20 @@ if __name__ == "__main__":
 
     with block:
         with gr.Row():
+            dino_path = gr.Text(label="Path to GroundingDINO checkpoint : ", value="checkpoints/groundingdino_swint_ogc.pth", placeholder="path to Grounding DINO checkpoint")
             with gr.Column():
-                input_image = gr.Image(source='upload', type="pil", value="assets/demo1.jpg", tool="sketch")
-                task_type = gr.Dropdown(["scribble", "automask", "det", "seg", "inpainting", "automatic"], value="automatic", label="task_type")
+                sam_path = gr.Text(label="Path to SAM checkpoint :", value="checkpoints/sam_vit_h_4b8939.pth", placeholder="path to SAM checkpoint")
+                sam_version = gr.Dropdown(["vit_h", "vit_l", "vit_b"], value="vit_h", label="SAM ViT version")
+                use_sam_hq = gr.Checkbox(label="Use SAM-HQ", value=False)
+            load_ckpts = gr.Button(variant="primary", size="lg", value="Load DINO and SAM",  container=True)
+        with gr.Row():
+            with gr.Column():
+                input_image = gr.Image(source='upload', type="pil", value=args.img, tool="sketch")
+                task_type = gr.Dropdown(["scribble", "automask", "det", "seg"], value="scribble", label="task_type") #'automatic' disabled need blip and transformers
                 text_prompt = gr.Textbox(label="Text Prompt")
-                inpaint_prompt = gr.Textbox(label="Inpaint Prompt")
-                run_button = gr.Button(label="Run")
+                with gr.Row():
+                    next_button = gr.Button(value="Next Image", interactive=False) #TODO   
+                    run_button = gr.Button(label="Run", interactive=False)
                 with gr.Accordion("Advanced options", open=False):
                     box_threshold = gr.Slider(
                         label="Box Threshold", minimum=0.0, maximum=1.0, value=0.3, step=0.05
@@ -384,17 +404,14 @@ if __name__ == "__main__":
                     iou_threshold = gr.Slider(
                         label="IOU Threshold", minimum=0.0, maximum=1.0, value=0.5, step=0.05
                     )
-                    inpaint_mode = gr.Dropdown(["merge", "first"], value="merge", label="inpaint_mode")
                     scribble_mode = gr.Dropdown(["merge", "split"], value="split", label="scribble_mode")
-                    openai_api_key= gr.Textbox(label="(Optional)OpenAI key, enable chatgpt")
 
             with gr.Column():
-                gallery = gr.Gallery(
-                    label="Generated images", show_label=False, elem_id="gallery"
-                ).style(preview=True, grid=2, object_fit="scale-down")
+                gallery = gr.Gallery(label="Generated images", show_label=False, elem_id="gallery").style(preview=True, grid=2, object_fit="scale-down")
 
-        run_button.click(fn=run_grounded_sam, inputs=[
-                        input_image, text_prompt, task_type, inpaint_prompt, box_threshold, text_threshold, iou_threshold, inpaint_mode, scribble_mode, openai_api_key], outputs=gallery)
+        load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
+        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, iou_threshold, scribble_mode], outputs=gallery)
+
 
     block.queue(concurrency_count=100)
     block.launch(server_name='0.0.0.0', server_port=args.port, debug=args.debug, share=args.share)
