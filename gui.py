@@ -130,16 +130,14 @@ def draw_box(box, draw, label):
             w, h = draw.textsize(str(label), font)
             bbox = (box[0], box[1], w + box[0], box[1] + h)
         draw.rectangle(bbox, fill=color)
-        draw.text((box[0], box[1]), str(label), fill="white")
-
-        draw.text((box[0], box[1]), label)
+        draw.text((box[0], box[1]), str(label), font_size=40, fill="white")
 
 
 
 config_file = 'GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
 ckpt_repo_id = "ShilongLiu/GroundingDINO"
-dino_ckpt = "groundingdino_swint_ogc.pth"
-sam_ckpt='sam_vit_h_4b8939.pth' 
+dino_ckpt = "checkpoints/groundingdino_swint_ogc.pth"
+sam_ckpt = "checkpoints/sam_vit_h_4b8939.pth"
 output_dir="outputs"
 device="cuda"
 img_idx = 0
@@ -179,8 +177,6 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
 
     global groundingdino_model, sam_predictor, sam_automask_generator
 
-    # make dir
-    os.makedirs(output_dir, exist_ok=True)
     # load image
     if task_type == 'scribble':
         image = input_image["image"]
@@ -188,18 +184,6 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
     else:
         image = input_image
     size = image.size # w, h
-
-    # NO FIRST INIT
-    # if sam_predictor is None:
-    #     # initialize SAM
-    #     assert sam_ckpt, 'sam_ckpt is not found!'
-    #     sam = build_sam(checkpoint=sam_ckpt)
-    #     sam.to(device=device)
-    #     sam_predictor = SamPredictor(sam)
-    #     sam_automask_generator = SamAutomaticMaskGenerator(sam)
-
-    # if groundingdino_model is None:
-    #     groundingdino_model = load_model(config_file, dino_ckpt, device=device)
 
     image_pil = image.convert("RGB")
     image = np.array(image_pil)
@@ -317,7 +301,7 @@ def next_img():
     else: #last image ; func should be disabled
         next_btn =  gr.Button(value="No more images, IMP", interactive=False)
 
-    return Image.open(paths[img_idx]), gr.Button(value="Previous Image", interactive=True), next_btn, f"{img_idx+1}/{len(paths)}"
+    return Image.open(paths[img_idx]), gr.Button(value="Previous Image", interactive=True), next_btn, f"{img_idx+1}/{len(paths)} : {paths[img_idx].split('/')[-1]}"
 
 def prev_img():
     global img_idx
@@ -331,7 +315,7 @@ def prev_img():
     else: #first image; func should be disabled
         prev_btn = gr.Button(value="No more images, IMP", interactive=False)
 
-    return Image.open(paths[img_idx]), prev_btn, gr.Button(value="Next Image",interactive=True), f"{img_idx+1}/{len(paths)}"
+    return Image.open(paths[img_idx]), prev_btn, gr.Button(value="Next Image",interactive=True), f"{img_idx+1}/{len(paths)} : {paths[img_idx].split('/')[-1]}"
     
 def does_need_text(task):
     if task == 'det' or task == 'seg':
@@ -352,12 +336,28 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(args)
+
+    # make dir
+    os.makedirs(output_dir, exist_ok=True)
     
     # ignore subfolder and raw image
     # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
     EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
     paths = [args.img] if os.path.isfile(args.img) else sorted([os.path.join(args.img, f) for f in os.listdir(args.img) if os.path.isfile(os.path.join(args.img, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))])
     print(f"Found {len(paths)}")
+
+    try:
+        groundingdino_model = load_model(config_file, dino_ckpt, device=device)
+    except Exception as e:
+        print(f"Error loading Grounding DINO model: {e}")
+    
+    try:
+        sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt)
+        sam.to(device=device)
+        sam_predictor = SamPredictor(sam)
+        sam_automask_generator = SamAutomaticMaskGenerator(sam)
+    except Exception as e:
+        print(f"Error loading SAM model: {e}")
     
     block = gr.Blocks()
     if not args.no_gradio_queue:
@@ -365,20 +365,24 @@ if __name__ == "__main__":
 
     with block:
         with gr.Row():
-            with gr.Column(scale=0):
+            with gr.Column():
                 gr.Label(value="Model parameters", show_label=False, color='grey')
-                dino_path = gr.Text(label="Path to GroundingDINO checkpoint : ", value="checkpoints/groundingdino_swint_ogc.pth", placeholder="path to Grounding DINO checkpoint")
-                with gr.Column():
-                    sam_path = gr.Text(label="Path to SAM checkpoint :", value="checkpoints/sam_vit_h_4b8939.pth", placeholder="path to SAM checkpoint")
-                    sam_version = gr.Dropdown(["vit_h", "vit_l", "vit_b"], value="vit_h", label="SAM ViT version")
-                    use_sam_hq = gr.Checkbox(label="Use SAM-HQ", value=False)
-                load_ckpts = gr.Button(variant="primary", size="lg", value="Load DINO and SAM",  container=True)
+                with gr.Row(equal_height=False):
+                    dino_path = gr.Text(label="Path to GroundingDINO checkpoint : ", value="checkpoints/groundingdino_swint_ogc.pth", placeholder="path to Grounding DINO checkpoint")
+                    with gr.Row(equal_height=True):
+                        sam_path = gr.Text(label="Path to SAM checkpoint :", value="checkpoints/sam_vit_h_4b8939.pth", placeholder="path to SAM checkpoint")
+                        with gr.Column():
+                            sam_version = gr.Dropdown(["vit_h", "vit_l", "vit_b"], value="vit_h", label="SAM ViT version")
+                            use_sam_hq = gr.Checkbox(label="Use SAM-HQ", value=False)
+                with gr.Row():
+                    load_ckpts = gr.Button(variant="primary", size="lg", value="Load DINO and SAM",  container=True)
         
+        with gr.Row(equal_height=False):
             with gr.Column():
                 gr.Label(value="Input image", show_label=False, color='grey')
                 with gr.Group():
                     input_image = gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool="sketch", show_label=False, label="Input Image")
-                    count_img = gr.Label(value=f"{img_idx+1}/{len(paths)}", show_label=False, container=False, scale=0)
+                    count_img = gr.Label(f"{img_idx+1}/{len(paths)}: {paths[img_idx].split('/')[-1]}", show_label=False, container=False, scale=0)
                     with gr.Row(variant="panel",equal_height=True):
                         prev_button = gr.Button(value="No more images", interactive=False)
                         next_button = gr.Button(value="Next Image")
@@ -387,7 +391,10 @@ if __name__ == "__main__":
                     task_type = gr.Dropdown([("Mask w/ interactive SAM","scribble"), ("Mask w/ automatic SAM","automask"), ("Box w/ DINO","det"), ("Box and mask w/ DINO + SAM", "seg")], value="scribble", label="Task type") #'automatic' disabled need blip and transformers
                     text_prompt = gr.Textbox(label="Text Prompt", visible=False)
                 with gr.Row():
-                    run_button = gr.Button(label="Run", interactive=False,variant="stop")
+                    run_button = gr.Button(
+                        label="Run", 
+                        interactive=(groundingdino_model is not None and sam_predictor is not None and sam_automask_generator is not None), 
+                        variant="stop")
                 with gr.Accordion("Advanced options", open=False):
                     box_threshold = gr.Slider(
                         label="Box Threshold", minimum=0.0, maximum=1.0, value=0.3, step=0.05
@@ -412,7 +419,7 @@ if __name__ == "__main__":
 
     block.queue(concurrency_count=100)
     serv_ip = '0.0.0.0'
-  
+
     block.launch(
         server_name=serv_ip, 
         server_port=args.port, 
