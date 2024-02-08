@@ -248,9 +248,11 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
 
 
     filename, ext = paths[img_idx].split('/')[-1].split('.')
+    ext = 'jpg' # default, always jpg
     image_pil = image.convert("RGB")
     image = np.array(image_pil)
 
+    # run task
     if task_type == 'scribble':
         sam_predictor.set_image(image)
         scribble = scribble.convert("RGB")
@@ -327,8 +329,7 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
             draw_mask(mask[0].cpu().numpy(), mask_draw, random_color=True)
         image_pil = image_pil.convert('RGBA')
         image_pil.alpha_composite(mask_image)
-        return gallery + [(image_pil,filename), (mask_image,f'{filename}_mask.{ext}')]
-    
+        return gallery + [(image_pil,f'{filename}.{ext}'), (mask_image,f'{filename}_mask.{ext}')]
     elif task_type == 'seg':
         mask_image = Image.new('RGBA', size, color=(0, 0, 0, 0))
         mask_draw = ImageDraw.Draw(mask_image)
@@ -380,6 +381,16 @@ def does_need_text_prompt(task):
     else:
         return gr.Textbox(value="",visible=False), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool="sketch", show_label=False, label="Input Image")
 
+def save_outputs(gallery, progress=gr.Progress()):
+    for img, output_save_name in progress.tqdm(gallery, desc="Saving gallery", total=len(gallery), unit="image"):
+        try:
+            with Image.open(img['name']) as im: #local only
+                im.save(output_save_name)
+        except OSError as ose:
+            print(f"Could not create {output_save_name}: {ose}")
+        except ValueError as ve:
+            print(f"Format could not be determined from the file name {output_save_name}: {ve}")         
+    return gr.Button("! Saved !",variant="secondary")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Grounded SAM demo", add_help=True)
@@ -464,14 +475,17 @@ if __name__ == "__main__":
             
             with gr.Column(variant="panel"):
                 gr.Label(value="Outputs", show_label=False, color='grey')
+                save_button = gr.Button(value="💾 Save", variant="stop")
                 gallery = Gallery(show_download_button=True, show_label=False, preview=True, object_fit="scale-down")
 
         load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
         prev_button.click(fn=prev_img, outputs=[input_image, prev_button, next_button, count_img])
         next_button.click(fn=next_img, outputs=[input_image, prev_button, next_button, count_img])
         run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, scribble_mode], outputs=gallery)
+        save_button.click(fn=save_outputs, inputs=[gallery], outputs=[save_button])
+        
         task_type.change(fn=does_need_text_prompt, inputs=[task_type], outputs=[text_prompt,input_image])
-
+        gallery.change(fn=lambda x: gr.Button("💾 Save",variant="stop"), outputs=[save_button])
     block.queue(concurrency_count=100)
     serv_ip = '0.0.0.0'
 
