@@ -25,6 +25,8 @@ import torch
 # blur
 import blur_detector
 
+# front/back detection
+from rembg_test import remove
 
 # Monkey patching the Gallery class to allow the gallery 
 # to postprocess an existing list of images in gallery
@@ -120,7 +122,7 @@ def transform_image(image_pil):
 
 def load_model(model_config_path, model_checkpoint_path, device):
     args = SLConfig.fromfile(model_config_path)
-    args.device = device
+    device = device
     model = build_model(args)
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
     load_res = model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
@@ -205,7 +207,7 @@ sam_predictor = None
 sam_automask_generator = None
 
 def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
-    global groundingdino_model, sam_predictor, sam_automask_generator
+    global groundingdino_model, sam_predictor, sam_automask_generator, device, config_file
 
     # load grounding dino model
     try:
@@ -221,7 +223,7 @@ def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
             sam = sam_hq_model_registry[sam_version](checkpoint=sam_path)
         else:
             sam = sam_model_registry[sam_version](checkpoint=sam_path)
-        sam.to(device=device)
+        sam.to(device = device)
         sam_predictor = SamPredictor(sam)
         sam_automask_generator = SamAutomaticMaskGenerator(sam)
     except Exception as e:
@@ -230,9 +232,9 @@ def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
 
     return dino_path, sam_path, use_sam_hq, sam_version, gr.Button(interactive=True)
 
-def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, scribble_mode):
+def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, post_process_mask, scribble_mode):
 
-    global groundingdino_model, sam_predictor, sam_automask_generator
+    global groundingdino_model, sam_predictor, sam_automask_generator, device
 
     if gallery is None:
         gallery = []
@@ -285,6 +287,13 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         image_pil = image_pil.convert("L")
         image = np.array(image_pil)
         blur = blur_detector.detectBlur(image, downsampling_factor=4, num_scales=4, scale_start=2, num_iterations_RF_filter=3, show_progress=False)
+    elif task_type == 'frontback':
+        if remove_bg_mode == 'alpha_matting':
+            front = remove(image_pil, alpha_matting=True, post_process_mask=post_process_mask)
+        elif remove_bg_mode == 'only_mask':
+            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask)
+        else:
+            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask)
     else: # dino, dino+sam
         transformed_image = transform_image(image_pil)
 
@@ -346,7 +355,10 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
     elif task_type == 'blur':
         _, th1 = threshold(blur, 0.1, 1, THRESH_BINARY)
         return gallery + [(blur, f'{filename}_blur.{ext}'),((th1 * 255).astype('uint8'), f'{filename}_blur_threshed.{ext}')]
-    
+    elif task_type == 'frontback':
+        mode = remove_bg_mode if remove_bg_mode != 'None' else ''
+        isPostpro = '_postpro' if post_process_mask else ''
+        return gallery + [(front, f'{filename}_front_{mode}{isPostpro}.{ext}')]
     else:
         print("task_type:{} error!".format(task_type))
 
@@ -381,16 +393,17 @@ def prev_img():
 def does_need_text_prompt(task):
     if task == 'det' or task == 'seg':
         return gr.Textbox(visible=True), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool=None, show_label=False, label="Input Image")
-    elif task == 'automask' or task == 'blur':
+    elif task == 'automask' or task == 'blur' or task == 'frontback':
         return gr.Textbox(value="",visible=False), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool=None, show_label=False, label="Input Image")
     else:
         return gr.Textbox(value="",visible=False), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool="sketch", show_label=False, label="Input Image")
 
 def save_outputs(gallery, progress=gr.Progress()):
+    global output_dir 
     for img, output_save_name in progress.tqdm(gallery, desc="Saving gallery", total=len(gallery), unit="image"):
         try:
             with Image.open(img['name']) as im: #local only
-                im.save(output_save_name)
+                im.save(os.path.join(output_dir,output_save_name))
         except OSError as ose:
             print(f"Could not create {output_save_name}: {ose}")
         except ValueError as ve:
@@ -464,7 +477,8 @@ if __name__ == "__main__":
                         ("Mask w/ automatic SAM","automask"), 
                         ("Box w/ DINO","det"), 
                         ("Box and mask w/ DINO + SAM", "seg"),
-                        ("Blur detector", "blur")
+                        ("Blur detector", "blur"),
+                        ("Front/Back detection", "frontback")
                     ], value="scribble", label="Task type") #'automatic' disabled need blip and transformers
                     text_prompt = gr.Textbox(label="Text Prompt", visible=False)
                 with gr.Row():
@@ -473,16 +487,18 @@ if __name__ == "__main__":
                         interactive=(groundingdino_model is not None and sam_predictor is not None and sam_automask_generator is not None), 
                         variant="stop")
                 with gr.Accordion("Advanced options", open=False):
-                    box_threshold = gr.Slider(
-                        label="Box Threshold", minimum=0.0, maximum=1.0, value=0.3, step=0.05
-                    )
-                    text_threshold = gr.Slider(
-                        label="Text Threshold", minimum=0.0, maximum=1.0, value=0.25, step=0.05
-                    )
-                    iou_threshold = gr.Slider(
-                        label="IOU Threshold", minimum=0.0, maximum=1.0, value=0.5, step=0.05
-                    )
-                    scribble_mode = gr.Dropdown(["merge", "split"], value="split", label="scribble_mode")
+                    with gr.Group():
+                        box_threshold = gr.Slider(
+                            label="Box Threshold", minimum=0.0, maximum=1.0, value=0.3, step=0.05
+                        )
+                        text_threshold = gr.Slider(
+                            label="Text Threshold", minimum=0.0, maximum=1.0, value=0.25, step=0.05
+                        )
+                    with gr.Group():
+                        scribble_mode = gr.Dropdown(["merge", "split"], value="split", label="Scribble Mode")
+                    with gr.Group():
+                        remove_bg_mode = gr.Dropdown(["alpha_matting", "only_mask", "None"], value="alpha_matting", label="Remove background mode")
+                        post_process_mask = gr.Checkbox(label="Post process mask", value=False)
             
             with gr.Column(variant="panel"):
                 gr.Label(value="Outputs", show_label=False, color='grey')
@@ -492,11 +508,11 @@ if __name__ == "__main__":
         load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
         prev_button.click(fn=prev_img, outputs=[input_image, prev_button, next_button, count_img])
         next_button.click(fn=next_img, outputs=[input_image, prev_button, next_button, count_img])
-        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, scribble_mode], outputs=gallery)
+        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, post_process_mask, scribble_mode], outputs=gallery)
         save_button.click(fn=save_outputs, inputs=[gallery], outputs=[save_button])
         
         task_type.change(fn=does_need_text_prompt, inputs=[task_type], outputs=[text_prompt,input_image])
-        gallery.change(fn=lambda x: gr.Button("💾 Save",variant="stop"), outputs=[save_button])
+        gallery.change(fn=lambda:gr.Button("💾 Save",variant="stop"), outputs=[save_button])
     block.queue(concurrency_count=100)
     serv_ip = '0.0.0.0'
 

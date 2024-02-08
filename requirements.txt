@@ -18,6 +18,7 @@ timm
 torch
 torchvision
 transformers
+rembg[gpu]
 yapf
 nltk
 fairscale
