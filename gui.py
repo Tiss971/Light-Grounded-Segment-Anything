@@ -247,7 +247,7 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
 
 
     filename, ext = paths[img_idx].split('/')[-1].split('.')
-    ext = 'jpg' # default, always jpg
+    ext = 'png' # default, always jpg
     image_pil = image.convert("RGB")
     image = np.array(image_pil)
 
