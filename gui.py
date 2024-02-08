@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import os
 import random
-from scipy import ndimage
-
-import gradio as gr
+from pathlib import Path
 import argparse
 
+from scipy import ndimage
+import gradio as gr
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
-
+from cv2 import threshold, THRESH_BINARY
 # Grounding DINO
 import GroundingDINO.groundingdino.datasets.transforms as T
 from GroundingDINO.groundingdino.models import build_model
@@ -22,10 +22,9 @@ from segment_anything import SamPredictor, SamAutomaticMaskGenerator, sam_model_
 import numpy as np
 import torch
 
+# blur
+import blur_detector
 
-from pathlib import Path
-import numpy as np
-from PIL import Image as _Image  # using _ to minimize namespace pollution
 
 # Monkey patching the Gallery class to allow the gallery 
 # to postprocess an existing list of images in gallery
@@ -33,8 +32,8 @@ class Gallery(gr.Gallery):
     # Overriding the postprocess method to return the gallery
     def postprocess(
         self,
-        y: list[np.ndarray | _Image.Image | str]
-        | list[tuple[np.ndarray | _Image.Image | str, str]]
+        y: list[np.ndarray | Image.Image | str]
+        | list[tuple[np.ndarray | Image.Image | str, str]]
         | None,
     ) -> list[str]:
         """
@@ -54,7 +53,7 @@ class Gallery(gr.Gallery):
                 file = self.img_array_to_temp_file(img, dir=self.DEFAULT_TEMP_DIR)
                 file_path = str(gr.utils.abspath(file))
                 self.temp_files.add(file_path)
-            elif isinstance(img, _Image.Image):
+            elif isinstance(img, Image.Image):
                 file = self.pil_to_temp_file(img, dir=self.DEFAULT_TEMP_DIR)
                 file_path = str(gr.utils.abspath(file))
                 self.temp_files.add(file_path)
@@ -282,7 +281,11 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         )
     elif task_type == 'automask':
         masks = sam_automask_generator.generate(image)
-    else:
+    elif task_type == 'blur':
+        image_pil = image_pil.convert("L")
+        image = np.array(image_pil)
+        blur = blur_detector.detectBlur(image, downsampling_factor=4, num_scales=4, scale_start=2, num_iterations_RF_filter=3, show_progress=False)
+    else: # dino, dino+sam
         transformed_image = transform_image(image_pil)
 
         # run grounding dino model
@@ -299,7 +302,6 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
 
         boxes_filt = boxes_filt.cpu()
 
-
         if task_type == 'seg':
             sam_predictor.set_image(image)
 
@@ -312,16 +314,16 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
                 multimask_output = False,
             )
 
+    # process output
     if task_type == 'det':
         image_draw = ImageDraw.Draw(image_pil)
         for box, label in zip(boxes_filt, pred_phrases):
             draw_box(box, image_draw, label)
+        
         return gallery + [(image_pil, f'{filename}_bbox.{ext}')]
-    
     elif task_type == 'automask':
         full_img, res = show_anns(masks)
         return gallery + [(full_img, f'{filename}_automask.{ext}')]
-    
     elif task_type == 'scribble':
         mask_image = Image.new('RGBA', size, color=(0, 0, 0, 0))
         mask_draw = ImageDraw.Draw(mask_image)
@@ -341,6 +343,9 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         image_pil = image_pil.convert('RGBA')
         image_pil.alpha_composite(mask_image)
         return gallery + [(image_pil, f'{filename}_mask_bbox.{ext}'), (mask_image, f'{filename}_mask.{ext}')]
+    elif task_type == 'blur':
+        _, th1 = threshold(blur, 0.1, 1, THRESH_BINARY)
+        return gallery + [(blur, f'{filename}_blur.{ext}'),((th1 * 255).astype('uint8'), f'{filename}_blur_threshed.{ext}')]
     
     else:
         print("task_type:{} error!".format(task_type))
@@ -376,7 +381,7 @@ def prev_img():
 def does_need_text_prompt(task):
     if task == 'det' or task == 'seg':
         return gr.Textbox(visible=True), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool=None, show_label=False, label="Input Image")
-    elif task == 'automask':
+    elif task == 'automask' or task == 'blur':
         return gr.Textbox(value="",visible=False), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool=None, show_label=False, label="Input Image")
     else:
         return gr.Textbox(value="",visible=False), gr.Image(source='upload', type="pil", value=Image.open(paths[img_idx]), tool="sketch", show_label=False, label="Input Image")
@@ -454,7 +459,13 @@ if __name__ == "__main__":
                         next_button = gr.Button(value="Next Image →")
 
                 with gr.Row():
-                    task_type = gr.Dropdown([("Mask w/ interactive SAM","scribble"), ("Mask w/ automatic SAM","automask"), ("Box w/ DINO","det"), ("Box and mask w/ DINO + SAM", "seg")], value="scribble", label="Task type") #'automatic' disabled need blip and transformers
+                    task_type = gr.Dropdown([
+                        ("Mask w/ interactive SAM","scribble"), 
+                        ("Mask w/ automatic SAM","automask"), 
+                        ("Box w/ DINO","det"), 
+                        ("Box and mask w/ DINO + SAM", "seg"),
+                        ("Blur detector", "blur")
+                    ], value="scribble", label="Task type") #'automatic' disabled need blip and transformers
                     text_prompt = gr.Textbox(label="Text Prompt", visible=False)
                 with gr.Row():
                     run_button = gr.Button(
