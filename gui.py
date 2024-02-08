@@ -232,7 +232,7 @@ def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
 
     return dino_path, sam_path, use_sam_hq, sam_version, gr.Button(interactive=True)
 
-def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, post_process_mask, scribble_mode):
+def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, mask_bg, post_process_mask, scribble_mode):
 
     global groundingdino_model, sam_predictor, sam_automask_generator, device
 
@@ -288,12 +288,13 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         image = np.array(image_pil)
         blur = blur_detector.detectBlur(image, downsampling_factor=4, num_scales=4, scale_start=2, num_iterations_RF_filter=3, show_progress=False)
     elif task_type == 'frontback':
+        bgcolor=(0, 0, 0, 255) if mask_bg else None
         if remove_bg_mode == 'alpha_matting':
-            front = remove(image_pil, alpha_matting=True, post_process_mask=post_process_mask)
+            front = remove(image_pil, alpha_matting=True, post_process_mask=post_process_mask, bgcolor=bgcolor)
         elif remove_bg_mode == 'only_mask':
-            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask)
+            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask, bgcolor=bgcolor)
         else:
-            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask)
+            front = remove(image_pil, alpha_matting=False, post_process_mask=post_process_mask, bgcolor=bgcolor)
     else: # dino, dino+sam
         transformed_image = transform_image(image_pil)
 
@@ -358,7 +359,17 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
     elif task_type == 'frontback':
         mode = remove_bg_mode if remove_bg_mode != 'None' else ''
         isPostpro = '_postpro' if post_process_mask else ''
-        return gallery + [(front, f'{filename}_front_{mode}{isPostpro}.{ext}')]
+        isMaskBg = '_maskbg' if mask_bg else ''
+        if mask_bg:
+            # pillow if one of three channel > 0, make it 255
+            front = front.convert("RGBA")
+            front_data = np.array(front)
+            rgb = front_data[:,:,0:3]
+            # change all (r,g,b) > (0,0,0) to (255,255,255)
+            white = (rgb > [0,0,0]).any(axis=2)
+            front_data[white] = [255,255,255,255]
+            front = Image.fromarray(front_data)
+        return gallery + [(front, f'{filename}_front_{mode}{isMaskBg}{isPostpro}.{ext}')]
     else:
         print("task_type:{} error!".format(task_type))
 
@@ -498,6 +509,7 @@ if __name__ == "__main__":
                         scribble_mode = gr.Dropdown(["merge", "split"], value="split", label="Scribble Mode")
                     with gr.Group():
                         remove_bg_mode = gr.Dropdown(["alpha_matting", "only_mask", "None"], value="alpha_matting", label="Remove background mode")
+                        mask_bg = gr.Checkbox(label="Mask background instead of remove", value=False)
                         post_process_mask = gr.Checkbox(label="Post process mask", value=False)
             
             with gr.Column(variant="panel"):
@@ -508,7 +520,7 @@ if __name__ == "__main__":
         load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
         prev_button.click(fn=prev_img, outputs=[input_image, prev_button, next_button, count_img])
         next_button.click(fn=next_img, outputs=[input_image, prev_button, next_button, count_img])
-        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, post_process_mask, scribble_mode], outputs=gallery)
+        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, remove_bg_mode, mask_bg, post_process_mask, scribble_mode], outputs=gallery)
         save_button.click(fn=save_outputs, inputs=[gallery], outputs=[save_button])
         
         task_type.change(fn=does_need_text_prompt, inputs=[task_type], outputs=[text_prompt,input_image])
