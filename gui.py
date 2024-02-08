@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import os
 import random
 from scipy import ndimage
-
 
 import gradio as gr
 import argparse
@@ -21,6 +22,65 @@ from segment_anything import SamPredictor, SamAutomaticMaskGenerator, sam_model_
 import numpy as np
 import torch
 
+
+from pathlib import Path
+import numpy as np
+from PIL import Image as _Image  # using _ to minimize namespace pollution
+
+# Monkey patching the Gallery class to allow the gallery 
+# to postprocess an existing list of images in gallery
+class Gallery(gr.Gallery):
+    # Overriding the postprocess method to return the gallery
+    def postprocess(
+        self,
+        y: list[np.ndarray | _Image.Image | str]
+        | list[tuple[np.ndarray | _Image.Image | str, str]]
+        | None,
+    ) -> list[str]:
+        """
+        Parameters:
+            y: list of images, or list of (image, caption) tuples
+        Returns:
+            list of string file paths to images in temp directory
+        """
+        if y is None:
+            return []
+        output = []
+        for img in y:
+            caption = None
+            if isinstance(img, (tuple, list)):
+                img, caption = img
+            if isinstance(img, np.ndarray):
+                file = self.img_array_to_temp_file(img, dir=self.DEFAULT_TEMP_DIR)
+                file_path = str(gr.utils.abspath(file))
+                self.temp_files.add(file_path)
+            elif isinstance(img, _Image.Image):
+                file = self.pil_to_temp_file(img, dir=self.DEFAULT_TEMP_DIR)
+                file_path = str(gr.utils.abspath(file))
+                self.temp_files.add(file_path)
+            elif isinstance(img, (str, Path)):
+                if gr.utils.validate_url(img):
+                    file_path = img
+                else:
+                    file_path = self.make_temp_copy_if_needed(img)
+            elif isinstance(img, dict):
+                if img["is_file"]:
+                    file_path = self.make_temp_copy_if_needed(img["name"]) 
+                else:
+                    file = self.img_array_to_temp_file(img["data"], dir=self.DEFAULT_TEMP_DIR)
+                    file_path = str(gr.utils.abspath(file))
+                    self.temp_files.add(file_path)
+            else:
+                raise ValueError(f"Cannot process type as image: {type(img)}")
+
+            if caption is not None:
+                output.append(
+                    [{"name": file_path, "data": None, "is_file": True}, caption]
+                )
+            else:
+                output.append({"name": file_path, "data": None, "is_file": True})
+
+        return output
 
 def show_anns(anns):
     if len(anns) == 0:
@@ -141,7 +201,6 @@ sam_ckpt = "checkpoints/sam_vit_h_4b8939.pth"
 output_dir="outputs"
 device="cuda"
 img_idx = 0
-
 groundingdino_model = None
 sam_predictor = None
 sam_automask_generator = None
@@ -173,9 +232,12 @@ def load_ckpt(dino_path, sam_path, use_sam_hq=False, sam_version="vit_h"):
 
     return dino_path, sam_path, use_sam_hq, sam_version, gr.Button(label="Run", interactive=True)
 
-def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, iou_threshold, scribble_mode):
+def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, scribble_mode):
 
     global groundingdino_model, sam_predictor, sam_automask_generator
+
+    if gallery is None:
+        gallery = []
 
     # load image
     if task_type == 'scribble':
@@ -185,6 +247,8 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         image = input_image
     size = image.size # w, h
 
+
+    filename, ext = paths[img_idx].split('/')[-1].split('.')
     image_pil = image.convert("RGB")
     image = np.array(image_pil)
 
@@ -251,41 +315,33 @@ def run_grounded_sam(input_image, text_prompt, task_type, box_threshold, text_th
         image_draw = ImageDraw.Draw(image_pil)
         for box, label in zip(boxes_filt, pred_phrases):
             draw_box(box, image_draw, label)
-
-        return [image_pil]
+        return gallery + [(image_pil, f'{filename}_bbox.{ext}')]
+    
     elif task_type == 'automask':
         full_img, res = show_anns(masks)
-        return [full_img]
+        return gallery + [(full_img, f'{filename}_automask.{ext}')]
+    
     elif task_type == 'scribble':
         mask_image = Image.new('RGBA', size, color=(0, 0, 0, 0))
-
         mask_draw = ImageDraw.Draw(mask_image)
-
         for mask in masks:
             draw_mask(mask[0].cpu().numpy(), mask_draw, random_color=True)
-
         image_pil = image_pil.convert('RGBA')
         image_pil.alpha_composite(mask_image)
-        return [image_pil, mask_image]
-    elif task_type == 'seg' or task_type == 'automatic':
-        
+        return gallery + [(image_pil,filename), (mask_image,f'{filename}_mask.{ext}')]
+    
+    elif task_type == 'seg':
         mask_image = Image.new('RGBA', size, color=(0, 0, 0, 0))
-
         mask_draw = ImageDraw.Draw(mask_image)
         for mask in masks:
             draw_mask(mask[0].cpu().numpy(), mask_draw, random_color=True)
-
         image_draw = ImageDraw.Draw(image_pil)
-
         for box, label in zip(boxes_filt, pred_phrases):
             draw_box(box, image_draw, label)
-
-        if task_type == 'automatic':
-            image_draw.text((10, 10), text_prompt, fill='black')
-
         image_pil = image_pil.convert('RGBA')
         image_pil.alpha_composite(mask_image)
-        return [image_pil, mask_image]
+        return gallery + [(image_pil, f'{filename}_mask_bbox.{ext}'), (mask_image, f'{filename}_mask.{ext}')]
+    
     else:
         print("task_type:{} error!".format(task_type))
 
@@ -346,18 +402,18 @@ if __name__ == "__main__":
     paths = [args.img] if os.path.isfile(args.img) else sorted([os.path.join(args.img, f) for f in os.listdir(args.img) if os.path.isfile(os.path.join(args.img, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))])
     print(f"Found {len(paths)}")
 
-    try:
-        groundingdino_model = load_model(config_file, dino_ckpt, device=device)
-    except Exception as e:
-        print(f"Error loading Grounding DINO model: {e}")
+    # try:
+    #     groundingdino_model = load_model(config_file, dino_ckpt, device=device)
+    # except Exception as e:
+    #     print(f"Error loading Grounding DINO model: {e}")
     
-    try:
-        sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt)
-        sam.to(device=device)
-        sam_predictor = SamPredictor(sam)
-        sam_automask_generator = SamAutomaticMaskGenerator(sam)
-    except Exception as e:
-        print(f"Error loading SAM model: {e}")
+    # try:
+    #     sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt)
+    #     sam.to(device=device)
+    #     sam_predictor = SamPredictor(sam)
+    #     sam_automask_generator = SamAutomaticMaskGenerator(sam)
+    # except Exception as e:
+    #     print(f"Error loading SAM model: {e}")
     
     block = gr.Blocks()
     if not args.no_gradio_queue:
@@ -409,12 +465,12 @@ if __name__ == "__main__":
             
             with gr.Column():
                 gr.Label(value="Outputs", show_label=False, color='grey')
-                gallery = gr.Gallery(label="Generated images", show_label=False, elem_id="gallery").style(preview=True, grid=2, object_fit="scale-down")
+                gallery = Gallery(show_download_button=True, show_label=False, preview=True, object_fit="scale-down")
 
         load_ckpts.click(fn=load_ckpt, inputs=[dino_path, sam_path, use_sam_hq, sam_version],outputs=[dino_path, sam_path, use_sam_hq, sam_version, run_button])
         prev_button.click(fn=prev_img, outputs=[input_image, prev_button, next_button, count_img])
         next_button.click(fn=next_img, outputs=[input_image, prev_button, next_button, count_img])
-        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, iou_threshold, scribble_mode], outputs=gallery)
+        run_button.click(fn=run_grounded_sam, inputs=[input_image, text_prompt, task_type, box_threshold, text_threshold, gallery, scribble_mode], outputs=gallery)
         task_type.change(fn=does_need_text, inputs=[task_type], outputs=[text_prompt,input_image])
 
     block.queue(concurrency_count=100)
