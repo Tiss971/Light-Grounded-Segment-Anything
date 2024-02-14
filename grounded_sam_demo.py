@@ -107,16 +107,18 @@ def show_box(box, ax, label):
     ax.text(x0, y0, label)
 
 
-def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask.jpg"):
+def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask", binary=False):
     value = 0  # 0 for background
-
+    ext = ".png"
     mask_img = torch.zeros(mask_list.shape[-2:])
     for idx, mask in enumerate(mask_list):
-        mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1
+        mask_img[mask.cpu().numpy()[0] == True] = value + 1
+        mask_img[mask.cpu().numpy()[0] == True] += idx if not binary else mask_img[mask.cpu().numpy()[0] == True]
+
     plt.figure(figsize=(10, 10))
-    plt.imshow(mask_img.numpy())
+    plt.imshow(mask_img.numpy(), cmap=plt.cm.gray if binary else 'viridis')
     plt.axis('off')
-    plt.savefig(os.path.join(output_dir, filename), bbox_inches="tight", dpi=300, pad_inches=0.0)
+    plt.imsave(os.path.join(output_dir, filename+ext), mask_img.numpy(), cmap=plt.cm.gray if binary else 'viridis')
 
     json_data = [{
         'value': value,
@@ -160,6 +162,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
     parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
+    parser.add_argument("--binary_mask", action="store_true", help="running on cpu only!")
 
     parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
     args = parser.parse_args()
@@ -193,7 +196,7 @@ if __name__ == "__main__":
     # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
     EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
 
-    paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.endswith(tuple(EXT_IMG_ALLOW))]
+    paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))]
     print(f"Found {len(paths)} images")
     for image_path in sorted(paths):
         # load image
@@ -251,10 +254,11 @@ if __name__ == "__main__":
         plt.axis('off')
         filename_ext = filename.split('.')
         plt.savefig(
-            os.path.join(output_dir, f"{filename_ext[0]}_all_masks.{filename_ext[1]}"),
+            os.path.join(output_dir, f"{filename_ext[0]}_all_masks.png"),
             bbox_inches="tight", dpi=300, pad_inches=0.0
         )
+        plt.close()
 
-        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename)
+        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
     print("Done")
 
