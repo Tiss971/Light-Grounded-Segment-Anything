@@ -183,6 +183,12 @@ if __name__ == "__main__":
     # load model
     model = load_model(config_file, grounded_checkpoint, device=device)
 
+    # initialize SAM
+    if use_sam_hq:
+        predictor = SamPredictor(sam_hq_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
+    else:
+        predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
+
     # ignore subfolder and raw image
     # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
     EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
@@ -208,11 +214,7 @@ if __name__ == "__main__":
         else:
             print(f"\t - {len(boxes_filt)} objects found for {filename}")
 
-        # initialize SAM
-        if use_sam_hq:
-            predictor = SamPredictor(sam_hq_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
-        else:
-            predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
+
         image = cv2.imread(image_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         predictor.set_image(image)
