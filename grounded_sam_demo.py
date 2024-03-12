@@ -6,6 +6,7 @@ import numpy as np
 import json
 import torch
 from PIL import Image
+import tqdm
 
 sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
 sys.path.append(os.path.join(os.getcwd(), "segment_anything"))
@@ -40,9 +41,8 @@ def load_image(image_path):
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ]
     )
-    image, _ = transform(image_pil, None)  # 3, h, w
-    return image_pil, image
-
+    image_norm, _ = transform(image_pil, None)  # 3, h, w
+    return image_pil, image_norm
 
 def load_model(model_config_path, model_checkpoint_path, device):
     args = SLConfig.fromfile(model_config_path)
@@ -53,7 +53,6 @@ def load_model(model_config_path, model_checkpoint_path, device):
     print(load_res)
     _ = model.eval()
     return model
-
 
 def get_grounding_output(model, image, caption, box_threshold, text_threshold, with_logits=True, device="cpu"):
     caption = caption.lower()
@@ -90,6 +89,7 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold, w
 
     return boxes_filt, pred_phrases
 
+
 def show_mask(mask, ax, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
@@ -112,30 +112,27 @@ def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask",
     ext = ".png"
     mask_img = torch.zeros(mask_list.shape[-2:])
     for idx, mask in enumerate(mask_list):
-        mask_img[mask.cpu().numpy()[0] == True] = value + 1
-        mask_img[mask.cpu().numpy()[0] == True] += idx if not binary else mask_img[mask.cpu().numpy()[0] == True]
+        mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1 if not binary else 1
 
-    plt.figure(figsize=(10, 10))
-    plt.imshow(mask_img.numpy(), cmap=plt.cm.gray if binary else 'viridis')
-    plt.axis('off')
     plt.imsave(os.path.join(output_dir, filename+ext), mask_img.numpy(), cmap=plt.cm.gray if binary else 'viridis')
 
-    json_data = [{
-        'value': value,
-        'label': 'background'
-    }]
-    for label, box in zip(label_list, box_list):
-        value += 1
-        name, logit = label.split('(')
-        logit = logit[:-1] # the last is ')'
-        json_data.append({
+    if not binary:
+        json_data = [{
             'value': value,
-            'label': name,
-            'logit': float(logit),
-            'box': box.numpy().tolist(),
-        })
-    with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
-        json.dump(json_data, f)
+            'label': 'background'
+        }]
+        for label, box in zip(label_list, box_list):
+            value += 1
+            name, logit = label.split('(')
+            logit = logit[:-1] # the last is ')'
+            json_data.append({
+                'value': value,
+                'label': name,
+                'logit': float(logit),
+                'box': box.numpy().tolist(),
+            })
+        with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
+            json.dump(json_data, f)
 
 
 if __name__ == "__main__":
@@ -198,38 +195,44 @@ if __name__ == "__main__":
 
     paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))]
     print(f"Found {len(paths)} images")
+   
+    pbar = tqdm.tqdm(total=len(paths))
     for image_path in sorted(paths):
         # load image
-        image_pil, image = load_image(image_path)
+        image_pil, image_norm = load_image(image_path)
         filename = os.path.basename(image_path).split('/')[-1]
-        print(f" ==> Processing {filename} <==")
-
-        # visualize raw image
-        # image_pil.save(os.path.join(output_dir, filename))
-
-        # run grounding dino model
+        filename_ext = filename.split('.')
+        pbar.update(1)
+        # RUN grounding dino model
         boxes_filt, pred_phrases = get_grounding_output(
-            model, image, text_prompt, box_threshold, text_threshold, device=device
+            model, image_norm, text_prompt, box_threshold, text_threshold, device=device
         )
+        
+        # SETUP IMAGE FOR SAM
+        image = np.array(image_pil)
+        H, W, C = image.shape
+
         if len(boxes_filt) == 0:
-            print(f"\t - No object found for {filename}")   
+            pbar.write(f"[{filename}] - No object found")
+            masks = torch.zeros(1, 1, H, W)
+            save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
             continue
+        # elif len(boxes_filt) > 10:
+        #     pbar.write(f"\t - {len(boxes_filt)} object found for {filename}")
+        #     pbar.write(f"\t - Too many, skipping")
+        #     continue
         else:
-            print(f"\t - {len(boxes_filt)} objects found for {filename}")
+            pbar.write(f"[{filename}] - {len(boxes_filt)} objects found")
 
-
-        image = cv2.imread(image_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        predictor.set_image(image)
-
-        size = image_pil.size
-        H, W = size[1], size[0]
+        # SETUP IMAGE FOR SAM 
+        predictor.set_image(image) 
+        # SETUP BOXES FOR SAM  
         for i in range(boxes_filt.size(0)):
             boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
             boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
             boxes_filt[i][2:] += boxes_filt[i][:2]
-
         boxes_filt = boxes_filt.cpu()
+
         transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
         masks, _, _ = predictor.predict_torch(
             point_coords = None,
@@ -237,27 +240,23 @@ if __name__ == "__main__":
             boxes = transformed_boxes.to(device),
             multimask_output = False,
         )
+        predictor.reset_image()
 
         # draw output image
-        plt.figure(figsize=(10, 10))
-        plt.imshow(image)
-        for mask in masks:
-            show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
-            #MAYBE: save each mask
-            # plt.savefig(
-            #     os.path.join(output_dir, f"{filename_ext[0]}_all_masks.{filename_ext[1]}"),
-            #     bbox_inches="tight", dpi=300, pad_inches=0.0
+        # fig, ax = plt.subplots(figsize=(10, 10))
+        # ax.imshow(image)
+        # for mask in masks:
+        #     show_mask(mask.cpu().numpy(), ax, random_color=True)
+        # for box, label in zip(boxes_filt, pred_phrases):
+        #     show_box(box.numpy(), ax, label)
+        # ax.axis('off')
+        
+        # plt.savefig(
+        #     os.path.join(output_dir, f"{filename_ext[0]}_all_masks.jpg"),
+        #     bbox_inches="tight", dpi=96, pad_inches=0.0
         # )
-        for box, label in zip(boxes_filt, pred_phrases):
-            show_box(box.numpy(), plt.gca(), label)
+        # plt.close(fig)
 
-        plt.axis('off')
-        filename_ext = filename.split('.')
-        plt.savefig(
-            os.path.join(output_dir, f"{filename_ext[0]}_all_masks.png"),
-            bbox_inches="tight", dpi=300, pad_inches=0.0
-        )
-        plt.close()
 
         save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
     print("Done")
