@@ -414,6 +414,9 @@ def save_outputs(gallery, progress=gr.Progress()):
     for img, output_save_name in progress.tqdm(gallery, desc="Saving gallery", total=len(gallery), unit="image"):
         try:
             with Image.open(img['name']) as im: #local only
+                if img['name'].contains('_mask'):
+                    im = im.convert('L')
+                    im = im.point(lambda p: p > 0 and 255)
                 im.save(os.path.join(output_dir,output_save_name))
         except OSError as ose:
             print(f"Could not create {output_save_name}: {ose}")
