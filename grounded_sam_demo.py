@@ -18,7 +18,6 @@ from GroundingDINO.groundingdino.models import build_model
 from GroundingDINO.groundingdino.util.slconfig import SLConfig
 from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
 
-
 # segment anything
 from segment_anything import (
     sam_model_registry,
@@ -27,9 +26,8 @@ from segment_anything import (
 )
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 
-
+## Helper functions
 def load_image(image_path):
     # load image
     image_pil = Image.open(image_path).convert("RGB")  # load image
@@ -54,6 +52,7 @@ def load_model(model_config_path, model_checkpoint_path, device):
     _ = model.eval()
     return model
 
+## Grounding functions
 def get_grounding_output(model, image, caption, box_threshold, text_threshold, with_logits=True, device="cpu"):
     caption = caption.lower()
     caption = caption.strip()
@@ -89,32 +88,43 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold, w
 
     return boxes_filt, pred_phrases
 
-
-def show_mask(mask, ax, random_color=False):
+## Draw and save functions
+def show_mask(mask, image, random_color=False):
     if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+        color = np.concatenate([np.random.random(3)], axis=0)
     else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])
-    h, w = mask.shape[-2:]
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
+        color = np.array([30/255, 144/255, 255/255])
+    mask = mask.astype(np.uint8)
+    mask = np.transpose(mask, (1, 2, 0))
 
+    mask_index = mask[:, :, 0] > 0
+    # simultate transparency
+    image[mask_index] = image[mask_index] * 0.5 + color * 255 * 0.5
+    
+    return image 
 
-def show_box(box, ax, label):
-    x0, y0 = box[0], box[1]
-    w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))
-    ax.text(x0, y0, label)
-
+def show_box(box, image, label):
+    x0, y0 = int(box[0]), int(box[1])
+    x1, y1 = int(box[2]), int(box[3])
+    color = (0, 255, 0)
+    cv2.rectangle(image, (x0, y0), (x1, y1), color, 5)
+    cv2.putText(image, label, (x0+2, y0+2), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
+    return image
 
 def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask", binary=False):
     value = 0  # 0 for background
     ext = ".png"
-    mask_img = torch.zeros(mask_list.shape[-2:])
+    mask_img = torch.zeros(mask_list.shape[-2:], dtype=torch.uint8)
     for idx, mask in enumerate(mask_list):
         mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1 if not binary else 1
 
-    plt.imsave(os.path.join(output_dir, filename+ext), mask_img.numpy(), cmap=plt.cm.gray if binary else 'viridis')
+    # kernel = np.ones((5,5), np.uint8)
+    # mask_img = cv2.morphologyEx(mask_img.numpy(), cv2.MORPH_CLOSE, kernel, iterations = 3) 
+
+    cv2.imwrite(os.path.join(output_dir, filename+ext), (mask_img.numpy() * 255))
+
+    # draw mask and box over
+    
 
     if not binary:
         json_data = [{
@@ -134,7 +144,7 @@ def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask",
         with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
             json.dump(json_data, f)
 
-
+# Main
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
@@ -160,6 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
     parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
     parser.add_argument("--binary_mask", action="store_true", help="running on cpu only!")
+    parser.add_argument("--overview", action="store_true", help="save boxes and masks over images")
 
     parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
     args = parser.parse_args()
@@ -195,38 +206,34 @@ if __name__ == "__main__":
 
     paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))]
     print(f"Found {len(paths)} images")
-   
+
     pbar = tqdm.tqdm(total=len(paths))
     for image_path in sorted(paths):
         # load image
         image_pil, image_norm = load_image(image_path)
         filename = os.path.basename(image_path).split('/')[-1]
         filename_ext = filename.split('.')
-        pbar.update(1)
+        
         # RUN grounding dino model
         boxes_filt, pred_phrases = get_grounding_output(
             model, image_norm, text_prompt, box_threshold, text_threshold, device=device
         )
-        
+
         # SETUP IMAGE FOR SAM
         image = np.array(image_pil)
         H, W, C = image.shape
 
         if len(boxes_filt) == 0:
             pbar.write(f"[{filename}] - No object found")
-            masks = torch.zeros(1, 1, H, W)
-            save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
+            empty_masks = torch.zeros(1, 1, H, W)
+            save_mask_data(output_dir, empty_masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
             continue
-        # elif len(boxes_filt) > 10:
-        #     pbar.write(f"\t - {len(boxes_filt)} object found for {filename}")
-        #     pbar.write(f"\t - Too many, skipping")
-        #     continue
         else:
             pbar.write(f"[{filename}] - {len(boxes_filt)} objects found")
 
-        # SETUP IMAGE FOR SAM 
-        predictor.set_image(image) 
-        # SETUP BOXES FOR SAM  
+        # SETUP IMAGE FOR SAM
+        predictor.set_image(image)
+        # SETUP BOXES FOR SAM
         for i in range(boxes_filt.size(0)):
             boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
             boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
@@ -242,22 +249,19 @@ if __name__ == "__main__":
         )
         predictor.reset_image()
 
-        # draw output image
-        # fig, ax = plt.subplots(figsize=(10, 10))
-        # ax.imshow(image)
-        # for mask in masks:
-        #     show_mask(mask.cpu().numpy(), ax, random_color=True)
-        # for box, label in zip(boxes_filt, pred_phrases):
-        #     show_box(box.numpy(), ax, label)
-        # ax.axis('off')
-        
-        # plt.savefig(
-        #     os.path.join(output_dir, f"{filename_ext[0]}_all_masks.jpg"),
-        #     bbox_inches="tight", dpi=96, pad_inches=0.0
-        # )
-        # plt.close(fig)
+        if args.overview:
+            # draw boxes and masks over images
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            for label, box in zip(pred_phrases, boxes_filt):
+                image = show_box(box.numpy(), image, label)
+            for mask in masks:
+                image = show_mask(mask.cpu().numpy(), image, random_color=True)
+            cv2.imwrite(os.path.join(output_dir, f"{filename_ext[0]}_all_masks.jpg"), image)
 
-
+        # Save mask
         save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
-    print("Done")
+
+        pbar.update(1)
+    pbar.close()
+    print("Done") # end of the script
 

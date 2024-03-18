@@ -274,3 +274,4 @@ class SamPredictor:
         self.orig_w = None
         self.input_h = None
         self.input_w = None
+        torch.cuda.empty_cache()
