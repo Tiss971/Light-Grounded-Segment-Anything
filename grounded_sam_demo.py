@@ -190,6 +190,8 @@ if __name__ == "__main__":
 
     # make dir
     os.makedirs(output_dir, exist_ok=True)
+    if args.overview:
+        os.makedirs(os.path.join(output_dir, "comp"), exist_ok=True)
 
     # load model
     model = load_model(config_file, grounded_checkpoint, device=device)
@@ -226,7 +228,7 @@ if __name__ == "__main__":
         if len(boxes_filt) == 0:
             pbar.write(f"[{filename}] - No object found")
             empty_masks = torch.zeros(1, 1, H, W)
-            save_mask_data(output_dir, empty_masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
+            # save_mask_data(output_dir, empty_masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
             continue
         else:
             pbar.write(f"[{filename}] - {len(boxes_filt)} objects found")
@@ -256,7 +258,7 @@ if __name__ == "__main__":
                 image = show_box(box.numpy(), image, label)
             for mask in masks:
                 image = show_mask(mask.cpu().numpy(), image, random_color=True)
-            cv2.imwrite(os.path.join(output_dir, f"{filename_ext[0]}_all_masks.jpg"), image)
+            cv2.imwrite(os.path.join(output_dir,"comp",f"{filename_ext[0]}_all_masks.jpg"), image)
 
         # Save mask
         save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
