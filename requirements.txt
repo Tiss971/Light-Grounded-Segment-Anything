@@ -1,6 +1,5 @@
 addict
 blur_detector
-diffusers
 gradio ~= 3.50.2
 huggingface_hub
 matplotlib
@@ -9,8 +8,6 @@ onnxruntime
 opencv_python
 Pillow
 pycocotools
-PyYAML
-requests
 setuptools
 supervision
 termcolor
@@ -20,6 +17,3 @@ torchvision
 transformers
 rembg[gpu]
 yapf
-nltk
-fairscale
-litellm

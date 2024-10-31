@@ -27,6 +27,11 @@ from segment_anything import (
 import cv2
 import numpy as np
 
+
+# ignore subfolder and raw image
+# EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
+EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
+
 ## Helper functions
 def load_image(image_path):
     # load image
@@ -108,25 +113,29 @@ def show_box(box, image, label):
     x1, y1 = int(box[2]), int(box[3])
     color = (0, 255, 0)
     cv2.rectangle(image, (x0, y0), (x1, y1), color, 5)
-    cv2.putText(image, label, (x0+2, y0+2), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
+    cv2.putText(image, label, (x0+5, y0-5), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
     return image
 
-def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask", binary=False):
-    value = 0  # 0 for background
+def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask", binary=False, invert=False):
     ext = ".png"
-    mask_img = torch.zeros(mask_list.shape[-2:], dtype=torch.uint8)
-    for idx, mask in enumerate(mask_list):
-        mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1 if not binary else 1
-
-    # kernel = np.ones((5,5), np.uint8)
-    # mask_img = cv2.morphologyEx(mask_img.numpy(), cv2.MORPH_CLOSE, kernel, iterations = 3) 
-
-    cv2.imwrite(os.path.join(output_dir, filename+ext), (mask_img.numpy() * 255))
-
-    # draw mask and box over
     
+    # Determine the value to use for filling the mask image based on binary and invert settings.
+    bin_value = 255 if not binary or invert else 0
+
+    mask_img = torch.ones(mask_list.shape[-2:], dtype=torch.uint8) * (bin_value if not binary else 0)
+
+    for idx, mask in enumerate(mask_list):
+        # Use list comprehension to convert the mask tensor to a NumPy array once per iteration.
+        np_mask = mask.cpu().numpy()[0]
+        if invert:
+            np_mask = ~np_mask  # Invert the mask inside the loop for better memory usage.
+        mask_img[np_mask] = bin_value * ((idx + 1) / len(mask_list)) if not binary else bin_value
+
+    mask_img = mask_img.numpy().astype(np.uint8)
+    cv2.imwrite(os.path.join(output_dir, filename + ext), mask_img)
 
     if not binary:
+        value = 0
         json_data = [{
             'value': value,
             'label': 'background'
@@ -141,38 +150,40 @@ def save_mask_data(output_dir, mask_list, box_list, label_list, filename="mask",
                 'logit': float(logit),
                 'box': box.numpy().tolist(),
             })
-        with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
-            json.dump(json_data, f)
+        # with open(os.path.join(output_dir, f"{filename.split('.')[0]}.json"), 'w') as f:
+        #     json.dump(json_data, f)
 
 # Main
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
-    parser.add_argument("--config", type=str, required=True, help="path to config file")
     parser.add_argument(
-        "--grounded_checkpoint", type=str, required=True, help="path to checkpoint file"
+        "--config", type=str, default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', help="path to config file")
+    parser.add_argument(
+        "--grounded_checkpoint", type=str, default="checkpoints/groundingdino_swint_ogc.pth", help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--sam_checkpoint", type=str, default="checkpoints/sam_vit_h_4b8939.pth", help="path to sam checkpoint file"
     )
     parser.add_argument(
         "--sam_version", type=str, default="vit_h", required=False, help="SAM ViT version: vit_b / vit_l / vit_h"
     )
     parser.add_argument(
-        "--sam_checkpoint", type=str, required=False, help="path to sam checkpoint file"
-    )
-    parser.add_argument(
         "--use_sam_hq", action="store_true", help="using sam-hq for prediction"
     )
     parser.add_argument("--input_image", type=str, required=True, help="path to image file")
+    parser.add_argument("--output_dir", "-o", type=str, default="outputs", required=True, help="output directory")
+
     parser.add_argument("--text_prompt", type=str, required=True, help="text prompt")
-    parser.add_argument(
-        "--output_dir", "-o", type=str, default="outputs", required=True, help="output directory"
-    )
+    parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
 
     parser.add_argument("--box_threshold", type=float, default=0.3, help="box threshold")
-    parser.add_argument("--text_threshold", type=float, default=0.25, help="text threshold")
-    parser.add_argument("--binary_mask", action="store_true", help="running on cpu only!")
-    parser.add_argument("--overview", action="store_true", help="save boxes and masks over images")
 
-    parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
+    parser.add_argument("--binary_mask", action="store_true", help="save masks as binary image")
+    parser.add_argument("--overview", action="store_true", help="save boxes and masks over images")
+    parser.add_argument("--invert", action="store_true", help="invert mask")
+
+    parser.add_argument("--device", type=str, default="gpu")
     args = parser.parse_args()
 
     # cfg
@@ -193,7 +204,7 @@ if __name__ == "__main__":
     if args.overview:
         os.makedirs(os.path.join(output_dir, "comp"), exist_ok=True)
 
-    # load model
+    # LOAD MODELS
     model = load_model(config_file, grounded_checkpoint, device=device)
 
     # initialize SAM
@@ -202,47 +213,42 @@ if __name__ == "__main__":
     else:
         predictor = SamPredictor(sam_model_registry[sam_version](checkpoint=sam_checkpoint).to(device))
 
-    # ignore subfolder and raw image
-    # EXT_IGNORE = ['.dng','.json','.raw','.cr2','.cr3'] # maybe more
-    EXT_IMG_ALLOW = ['.jpg','.jpeg','.png','.bmp','.tiff','.tif','.gif', '.heic', '.heif']
-
     paths = [image_path] if os.path.isfile(image_path) else [os.path.join(image_path, f) for f in os.listdir(image_path) if os.path.isfile(os.path.join(image_path, f)) and f.lower().endswith(tuple(EXT_IMG_ALLOW))]
     print(f"Found {len(paths)} images")
 
     pbar = tqdm.tqdm(total=len(paths))
     for image_path in sorted(paths):
-        # load image
+        # 1. load image
         image_pil, image_norm = load_image(image_path)
         filename = os.path.basename(image_path).split('/')[-1]
         filename_ext = filename.split('.')
         
-        # RUN grounding dino model
+        # 2. Run grounding dino model
         boxes_filt, pred_phrases = get_grounding_output(
             model, image_norm, text_prompt, box_threshold, text_threshold, device=device
         )
-
-        # SETUP IMAGE FOR SAM
-        image = np.array(image_pil)
-        H, W, C = image.shape
-
         if len(boxes_filt) == 0:
-            pbar.write(f"[{filename}] - No object found")
+            pbar.set_description(f"[{filename}] - No object found")
             empty_masks = torch.zeros(1, 1, H, W)
             # save_mask_data(output_dir, empty_masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
             continue
         else:
-            pbar.write(f"[{filename}] - {len(boxes_filt)} objects found")
+            pbar.set_description(f"[{filename}] - {len(boxes_filt)} objects found")
 
         # SETUP IMAGE FOR SAM
+        image = np.array(image_pil)
+        H, W, C = image.shape
         predictor.set_image(image)
+
         # SETUP BOXES FOR SAM
         for i in range(boxes_filt.size(0)):
             boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
             boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
             boxes_filt[i][2:] += boxes_filt[i][:2]
         boxes_filt = boxes_filt.cpu()
-
         transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+        
+        # 3. RUN SAM
         masks, _, _ = predictor.predict_torch(
             point_coords = None,
             point_labels = None,
@@ -251,6 +257,7 @@ if __name__ == "__main__":
         )
         predictor.reset_image()
 
+        # SAVE MASKs
         if args.overview:
             # draw boxes and masks over images
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -260,10 +267,8 @@ if __name__ == "__main__":
                 image = show_mask(mask.cpu().numpy(), image, random_color=True)
             cv2.imwrite(os.path.join(output_dir,"comp",f"{filename_ext[0]}_all_masks.jpg"), image)
 
-        # Save mask
-        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask)
+        save_mask_data(output_dir, masks, boxes_filt, pred_phrases, filename_ext[0], binary=args.binary_mask, invert=args.invert)
 
         pbar.update(1)
     pbar.close()
     print("Done") # end of the script
-
